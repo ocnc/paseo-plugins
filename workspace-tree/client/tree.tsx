@@ -7,7 +7,7 @@ import {
   type PluginSidebarViewProps,
   type WorkspaceRef,
 } from "@getpaseo/plugin/client";
-import { memo, useCallback, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Pressable, ScrollView, Text, View } from "react-native";
 import { treeLayout, treeParents } from "../shared/preferences";
 import {
@@ -17,8 +17,10 @@ import {
   useRowDragState,
   type DropTarget,
 } from "./drag";
+import { shades, unreadColor } from "./colors";
 import { nodeKey, useParents } from "./parents";
 import { RowActions } from "./actions";
+import { useSyncedSettings } from "./synced";
 import { PullRequestLine } from "./prs";
 
 // macOS / VS Code sidebar sizing: 13pt titles on an 18pt line, 11pt secondary text and headings.
@@ -29,6 +31,7 @@ const TITLE_LINE = 18;
 /** Box matching the title's first line (4pt padding + 18pt line), for items that sit beside it. */
 const titleLine = { height: TITLE_LINE, marginTop: 4, justifyContent: "center", alignItems: "center" } as const;
 const projectKey = (groupKey: string) => `project:${groupKey}`;
+const HOVER_GRACE_MS = 100;
 
 type Colors = PluginSidebarViewProps["theme"]["colors"];
 
@@ -86,23 +89,58 @@ function place(nodes: TreeNode[], project: string, parent: string | null, out: M
   }
 }
 
+/** Whether the open workspace is inside this node's children, to highlight that family's guide. */
+function containsActive(node: TreeNode, activeKey: string | undefined): boolean {
+  if (!activeKey) return false;
+  return node.children.some((child) => child.ref.key === activeKey || containsActive(child, activeKey));
+}
+
 function countDescendants(node: TreeNode): number {
   return node.children.reduce((total, child) => total + 1 + countDescendants(child), 0);
 }
 
 function indicatorColor(indicator: WorkspaceIndicator, colors: Colors): string | null {
   switch (indicator) {
+    // Green while an agent works, blue once there is something new to read, so the two
+    // never look alike whatever the theme's accent is.
     case "running":
-      return colors.accent;
+      return colors.statusSuccess;
     case "needs_input":
       return colors.statusWarning;
     case "attention":
-      return colors.statusSuccess;
+      return unreadColor(colors.surface0);
     case "failed":
       return colors.statusDanger;
     default:
       return null;
   }
+}
+
+/** Most urgent first; a folded parent shows the most urgent status hidden inside it. */
+const URGENCY: Record<WorkspaceIndicator, number> = {
+  failed: 4,
+  needs_input: 3,
+  attention: 2,
+  running: 1,
+  done: 0,
+};
+
+function hiddenStatus(
+  node: TreeNode,
+  indicators: ReadonlyMap<string, WorkspaceIndicator>,
+): WorkspaceIndicator | null {
+  let worst: WorkspaceIndicator | null = null;
+  const visit = (nodes: TreeNode[]) => {
+    for (const child of nodes) {
+      const indicator = indicators.get(child.key);
+      if (indicator && indicator !== "done" && (!worst || URGENCY[indicator] > URGENCY[worst])) {
+        worst = indicator;
+      }
+      visit(child.children);
+    }
+  };
+  visit(node.children);
+  return worst;
 }
 
 interface Layout {
@@ -115,6 +153,7 @@ interface TreeContext {
   layout: Layout;
   controller: DragController;
   dragEnabled: boolean;
+  indicators: ReadonlyMap<string, WorkspaceIndicator>;
 }
 
 function Chevron({
@@ -162,8 +201,9 @@ const WorkspaceNode = memo(function WorkspaceNode({
   depth: number;
   context: TreeContext;
 }) {
-  const { view, layout, controller, dragEnabled } = context;
+  const { view, layout, controller, dragEnabled, indicators } = context;
   const { colors } = view.theme;
+  const shade = useMemo(() => shades(colors.foreground), [colors.foreground]);
   const row = useWorkspace(node.ref, (workspace) => ({
     label: workspace.title ?? workspace.name,
     indicator: workspace.indicator,
@@ -178,9 +218,29 @@ const WorkspaceNode = memo(function WorkspaceNode({
   const hasChildren = node.children.length > 0;
   const open = hasChildren ? !layout.collapsed.has(node.key) : null;
   const selected = view.active.workspace?.key === node.ref.key;
+  // The highlight follows the pointer at once. Only the buttons linger briefly after the pointer
+  // leaves: crossing from the row onto a button can report a hover-out first, which used to hide
+  // the button just as the pointer reached it. Delaying the highlight too made hovering feel laggy.
   const [hovered, setHovered] = useState(false);
-  const hoverIn = useCallback(() => setHovered(true), []);
-  const hoverOut = useCallback(() => setHovered(false), []);
+  const [showButtons, setShowButtons] = useState(false);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hoverIn = useCallback(() => {
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    hoverTimer.current = null;
+    setHovered(true);
+    setShowButtons(true);
+  }, []);
+  const hoverOut = useCallback(() => {
+    setHovered(false);
+    if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    hoverTimer.current = setTimeout(() => setShowButtons(false), HOVER_GRACE_MS);
+  }, []);
+  useEffect(
+    () => () => {
+      if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    },
+    [],
+  );
 
   const press = useCallback(() => {
     if (drag.picking) {
@@ -196,6 +256,7 @@ const WorkspaceNode = memo(function WorkspaceNode({
   if (!row) return null;
   const dot = indicatorColor(row.indicator, colors);
   const hidden = open === false ? countDescendants(node) : 0;
+  const hiddenDot = hidden > 0 ? indicatorColor(hiddenStatus(node, indicators) ?? "done", colors) : null;
   const indent = 8 + depth * INDENT;
   const inside = drag.dropMode === "inside";
 
@@ -227,7 +288,7 @@ const WorkspaceNode = memo(function WorkspaceNode({
             borderRadius: 4,
             borderColor: inside ? colors.accent : "transparent",
             backgroundColor:
-              inside || selected ? colors.surface2 : pressed || hovered ? colors.surface1 : undefined,
+              inside || selected ? shade.selected : pressed ? shade.pressed : hovered ? shade.hover : undefined,
           })}
         >
           <Chevron open={open} label={row.label} onPress={toggle} color={colors.foregroundMuted} />
@@ -239,7 +300,7 @@ const WorkspaceNode = memo(function WorkspaceNode({
                 borderRadius: 3,
                 backgroundColor: dot ?? "transparent",
                 borderWidth: dot ? 0 : 1,
-                borderColor: colors.border,
+                borderColor: shade.lineStrong,
               }}
             />
           </View>
@@ -253,17 +314,40 @@ const WorkspaceNode = memo(function WorkspaceNode({
             <PullRequestLine workspaceId={node.ref.id} colors={colors} />
           </View>
           {hidden > 0 ? (
-            <View style={titleLine}>
+            <View
+              style={{ ...titleLine, flexDirection: "row", gap: 4 }}
+              accessibilityLabel={`${hidden} hidden workspaces`}
+            >
+              {hiddenDot ? (
+                <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: hiddenDot }} />
+              ) : null}
               <Text style={{ color: colors.foregroundMuted, fontSize: 11 }}>{hidden}</Text>
             </View>
           ) : null}
           <RowActions
             reference={node.ref}
             colors={colors}
-            showControls={hovered || view.layout.compact}
+            showControls={showButtons}
+            inline={view.layout.compact}
             onMove={pick}
           />
         </Pressable>
+        {selected ? (
+          // The open workspace gets an accent bar as well as its fill, so it is never confused
+          // with a hovered row or a family group.
+          <View
+            pointerEvents="none"
+            style={{
+              position: "absolute",
+              left: 0,
+              top: 3,
+              bottom: 3,
+              width: 3,
+              borderRadius: 1.5,
+              backgroundColor: colors.accent,
+            }}
+          />
+        ) : null}
         {drag.dropMode === "before" ? (
           <InsertLine edge="top" left={indent} color={colors.accent} />
         ) : null}
@@ -273,21 +357,25 @@ const WorkspaceNode = memo(function WorkspaceNode({
       </View>
       {open ? (
         <View>
-          {/* Guide line linking children to their parent, like an editor's file tree. */}
+          {node.children.map((child) => (
+            <WorkspaceNode key={child.key} node={child} depth={depth + 1} context={context} />
+          ))}
+          {/* Guide line linking children to their parent, like an editor's file tree. Drawn after
+              the rows so a hovered or selected row's background cannot cover it. It is
+              brighter for the family holding the open workspace, as VS Code does. */}
           <View
             pointerEvents="none"
             style={{
               position: "absolute",
+              zIndex: 1,
               left: indent + 8,
               top: 0,
-              bottom: 0,
+              bottom: 4,
               width: 1,
-              backgroundColor: colors.border,
+              backgroundColor: colors.foregroundMuted,
+              opacity: containsActive(node, view.active.workspace?.key) ? 0.9 : 0.55,
             }}
           />
-          {node.children.map((child) => (
-            <WorkspaceNode key={child.key} node={child} depth={depth + 1} context={context} />
-          ))}
         </View>
       ) : null}
     </View>
@@ -298,10 +386,12 @@ function ProjectSection({
   group,
   forest,
   context,
+  first,
 }: {
   group: Group<WorkspaceRef>;
   forest: TreeNode[];
   context: TreeContext;
+  first: boolean;
 }) {
   const { view, layout, controller } = context;
   const { colors } = view.theme;
@@ -320,7 +410,15 @@ function ProjectSection({
   const target = drag.dropMode === "top";
 
   return (
-    <View style={{ paddingBottom: 6 }}>
+    <View
+      style={{
+        paddingBottom: 6,
+        // A rule between projects, so each project reads as its own block.
+        ...(first
+          ? null
+          : { marginTop: 6, paddingTop: 4, borderTopWidth: 1, borderTopColor: shades(colors.foreground).line }),
+      }}
+    >
       <View ref={register}>
         <Pressable
           accessibilityRole="button"
@@ -335,11 +433,11 @@ function ProjectSection({
             alignItems: "center",
             gap: 6,
             paddingHorizontal: 8,
-            marginTop: 6,
+            marginTop: 2,
             borderWidth: 1,
             borderRadius: 4,
             borderColor: target ? colors.accent : "transparent",
-            backgroundColor: target ? colors.surface2 : undefined,
+            backgroundColor: target ? shades(colors.foreground).selected : undefined,
           }}
         >
           <Text style={{ width: 16, textAlign: "center", color: colors.foregroundMuted, fontSize: 10 }}>
@@ -367,7 +465,29 @@ function ProjectSection({
         </Pressable>
       </View>
       {open
-        ? forest.map((node) => <WorkspaceNode key={node.key} node={node} depth={0} context={context} />)
+        ? forest.map((node) =>
+            node.children.length > 0 ? (
+              // Each family sits in an outlined card, so a parent and everything it spawned read as
+              // one group. Outline only: a fill is how the open workspace is marked, and a filled
+              // card looked like the whole family was selected.
+              <View
+                key={node.key}
+                style={{
+                  marginVertical: 4,
+                  marginHorizontal: 4,
+                  paddingVertical: 2,
+                  borderRadius: 6,
+                  borderWidth: 1,
+                  borderColor: shades(colors.foreground).lineStrong,
+                  overflow: "hidden",
+                }}
+              >
+                <WorkspaceNode node={node} depth={0} context={context} />
+              </View>
+            ) : (
+              <WorkspaceNode key={node.key} node={node} depth={0} context={context} />
+            ),
+          )
         : null}
     </View>
   );
@@ -420,7 +540,7 @@ function PickBannerBody({
     <Pressable
       accessibilityRole="button"
       onPress={onPress}
-      style={{ paddingVertical: 4, paddingHorizontal: 8, borderRadius: 4, backgroundColor: colors.surface2 }}
+      style={{ paddingVertical: 4, paddingHorizontal: 8, borderRadius: 4, backgroundColor: shades(colors.foreground).button }}
     >
       <Text style={{ color: colors.foreground, fontSize: 11 }}>{label}</Text>
     </Pressable>
@@ -434,7 +554,7 @@ function PickBannerBody({
         borderRadius: 6,
         borderWidth: 1,
         borderColor: colors.accent,
-        backgroundColor: colors.surface1,
+        backgroundColor: shades(colors.foreground).hover,
       }}
     >
       <Text numberOfLines={2} style={{ color: colors.foreground, fontSize: 12 }}>
@@ -456,6 +576,56 @@ function PickBannerBody({
   );
 }
 
+/**
+ * Says so when saved moves or folds cannot be read or written, instead of the tree quietly
+ * ignoring drags and folds.
+ */
+function SettingsProblem({
+  what,
+  state,
+  saveFailed,
+  colors,
+}: {
+  what: string;
+  state: { status: string; error?: string; reload(): Promise<void>; reset(): Promise<boolean> };
+  saveFailed: boolean;
+  colors: Colors;
+}) {
+  const unreadable = state.status === "error" || state.status === "invalid";
+  if (!unreadable && !saveFailed) return null;
+  const message = unreadable
+    ? `Could not load ${what}${state.error ? `: ${state.error}` : ""}. Changes will not be saved.`
+    : `Could not save ${what}. Your last change may be lost.`;
+  const button = (label: string, onPress: () => void) => (
+    <Pressable
+      accessibilityRole="button"
+      onPress={onPress}
+      style={{ paddingVertical: 3, paddingHorizontal: 8, borderRadius: 4, backgroundColor: shades(colors.foreground).button }}
+    >
+      <Text style={{ color: colors.foreground, fontSize: 11 }}>{label}</Text>
+    </Pressable>
+  );
+  return (
+    <View
+      style={{
+        marginHorizontal: 8,
+        marginVertical: 4,
+        padding: 8,
+        gap: 6,
+        borderRadius: 6,
+        borderWidth: 1,
+        borderColor: colors.statusDanger,
+      }}
+    >
+      <Text style={{ color: colors.statusDanger, fontSize: 11 }}>{message}</Text>
+      <View style={{ flexDirection: "row", gap: 6 }}>
+        {button("Retry", () => void state.reload())}
+        {state.status === "invalid" ? button("Reset", () => void state.reset()) : null}
+      </View>
+    </View>
+  );
+}
+
 export function WorkspaceTree(view: PluginSidebarViewProps) {
   const layoutSettings = useSettings(treeLayout);
   const parentSettings = useSettings(treeParents);
@@ -468,7 +638,20 @@ export function WorkspaceTree(view: PluginSidebarViewProps) {
   const refs = useMemo(() => groups.flatMap((group) => group.items), [groups]);
   const recorded = useParents(refs);
 
-  const overrides = parentSettings.status === "ready" ? parentSettings.values.overrides : null;
+  const parentsSync = useSyncedSettings(parentSettings);
+  const layoutSync = useSyncedSettings(layoutSettings);
+  const overrides = parentsSync.value?.overrides ?? null;
+  const byIndicator = useWorkspaces({
+    where: (workspace) => !workspace.background && !workspace.archivingAt,
+    groupBy: (workspace) => workspace.indicator,
+  });
+  const indicators = useMemo(() => {
+    const map = new Map<string, WorkspaceIndicator>();
+    for (const group of byIndicator) {
+      for (const ref of group.items) map.set(nodeKey(ref.hostId, ref.id), group.key as WorkspaceIndicator);
+    }
+    return map;
+  }, [byIndicator]);
   const { forests, placements } = useMemo(() => {
     const effective = new Map(recorded);
     for (const [key, parent] of Object.entries(overrides ?? {})) effective.set(key, parent);
@@ -483,16 +666,16 @@ export function WorkspaceTree(view: PluginSidebarViewProps) {
   }, [groups, recorded, overrides]);
 
   // Read through refs so gesture handlers created once always see the current tree.
-  const latest = useRef({ placements, recorded, parentSettings });
-  latest.current = { placements, recorded, parentSettings };
+  const latest = useRef({ placements, recorded, overrides, parentsSync });
+  latest.current = { placements, recorded, overrides, parentsSync };
 
   const saveParent = useCallback((source: string, parent: string | null | "recorded") => {
-    const { recorded, parentSettings } = latest.current;
-    if (parentSettings.status !== "ready") return;
-    const next = { ...parentSettings.values.overrides };
+    const { recorded, overrides, parentsSync } = latest.current;
+    if (overrides === null) return;
+    const next = { ...overrides };
     if (parent === "recorded" || parent === (recorded.get(source) ?? null)) delete next[source];
     else next[source] = parent;
-    void parentSettings.save({ overrides: next }, parentSettings.revision);
+    parentsSync.set({ overrides: next });
   }, []);
 
   controller.policy = useMemo(
@@ -524,26 +707,25 @@ export function WorkspaceTree(view: PluginSidebarViewProps) {
     [saveParent],
   );
 
-  const collapsedList = layoutSettings.status === "ready" ? layoutSettings.values.collapsed : null;
-  const { save: saveLayout } = layoutSettings;
-  const layoutRevision = layoutSettings.status === "ready" ? layoutSettings.revision : null;
+  const collapsedList = layoutSync.value?.collapsed ?? null;
+  const setLayout = layoutSync.set;
   const layout = useMemo<Layout>(() => {
     const collapsed = new Set(collapsedList ?? []);
     return {
       collapsed,
       toggle(key) {
-        if (layoutRevision === null) return;
+        if (collapsedList === null) return;
         const next = new Set(collapsed);
         if (next.has(key)) next.delete(key);
         else next.add(key);
-        void saveLayout({ collapsed: [...next] }, layoutRevision);
+        setLayout({ collapsed: [...next] });
       },
     };
-  }, [collapsedList, layoutRevision, saveLayout]);
+  }, [collapsedList, setLayout]);
 
   const context = useMemo<TreeContext>(
-    () => ({ view, layout, controller, dragEnabled: !view.layout.compact }),
-    [view, layout, controller],
+    () => ({ view, layout, controller, dragEnabled: !view.layout.compact, indicators }),
+    [view, layout, controller, indicators],
   );
   const restore = useCallback((key: string) => saveParent(key, "recorded"), [saveParent]);
 
@@ -553,19 +735,27 @@ export function WorkspaceTree(view: PluginSidebarViewProps) {
   return (
     <ScrollView style={{ flex: 1 }} contentContainerStyle={{ paddingVertical: 4 }}>
       <PickBanner context={context} placements={placements} overrides={overrides} restore={restore} />
-      {parentSettings.saveError ? (
-        <Text style={{ color: view.theme.colors.statusDanger, fontSize: 11, paddingHorizontal: 12 }}>
-          Could not save the move: {parentSettings.saveError}
-        </Text>
-      ) : null}
+      <SettingsProblem
+        what="workspace moves"
+        state={parentSettings}
+        saveFailed={parentsSync.failed}
+        colors={view.theme.colors}
+      />
+      <SettingsProblem
+        what="folded folders"
+        state={layoutSettings}
+        saveFailed={layoutSync.failed}
+        colors={view.theme.colors}
+      />
       {groups.length === 0 ? (
         <Text style={{ color: view.theme.colors.foregroundMuted, fontSize: 12, padding: 12 }}>
           No workspaces yet.
         </Text>
       ) : null}
-      {groups.map((group) => (
+      {groups.map((group, index) => (
         <ProjectSection
           key={group.key}
+          first={index === 0}
           group={group}
           forest={forests.get(group.key) ?? []}
           context={context}

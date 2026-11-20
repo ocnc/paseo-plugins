@@ -3,6 +3,7 @@ import { Icon } from "@getpaseo/plugin/client/ui";
 import { useQuery } from "@tanstack/react-query";
 import { memo, useCallback, useState } from "react";
 import { Pressable, Text, View } from "react-native";
+import { mergedColor, shades } from "./colors";
 import { workspacePullRequests, type PullRequest } from "../shared/prs";
 
 type Colors = PluginSidebarViewProps["theme"]["colors"];
@@ -32,17 +33,9 @@ function stateIcon(pr: PullRequest): string {
  * merged token, so this uses Paseo's own statusMerged values for light and dark backgrounds.
  */
 function stateColor(pr: PullRequest, colors: Colors): string {
-  if (pr.state === "merged") return isDark(colors.surface0) ? "#a890d5" : "#7347af";
+  if (pr.state === "merged") return mergedColor(colors.surface0);
   if (pr.state === "closed") return colors.statusDanger;
   return pr.draft ? colors.foregroundMuted : colors.statusSuccess;
-}
-
-function isDark(hex: string): boolean {
-  const match = /^#?([0-9a-f]{6})/i.exec(hex);
-  if (!match) return true;
-  const value = parseInt(match[1], 16);
-  const luminance = 0.299 * (value >> 16) + 0.587 * ((value >> 8) & 255) + 0.114 * (value & 255);
-  return luminance < 128;
 }
 
 const STATE_WORD: Record<PullRequest["state"], string> = { open: "", merged: " Merged", closed: " Closed" };
@@ -92,8 +85,8 @@ const Chip = memo(function Chip({ pr, colors }: { pr: PullRequest; colors: Color
         paddingVertical: 1,
         borderRadius: 4,
         borderWidth: pr.current ? 1 : 0,
-        borderColor: colors.border,
-        backgroundColor: pressed ? colors.surface2 : undefined,
+        borderColor: shades(colors.foreground).lineStrong,
+        backgroundColor: pressed ? shades(colors.foreground).pressed : undefined,
         opacity: pr.state === "closed" && !hovered ? 0.7 : 1,
       })}
     >

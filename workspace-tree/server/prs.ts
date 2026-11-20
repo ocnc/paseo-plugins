@@ -62,6 +62,7 @@ interface GhPullRequest {
   state: "OPEN" | "MERGED" | "CLOSED";
   isDraft: boolean;
   headRefName: string;
+  author?: { login?: string } | null;
   reviewDecision: "APPROVED" | "CHANGES_REQUESTED" | "REVIEW_REQUIRED" | "" | null;
   mergeable: "MERGEABLE" | "CONFLICTING" | "UNKNOWN";
   statusCheckRollup: Array<{ status?: string | null; conclusion?: string | null; state?: string | null }> | null;
@@ -96,6 +97,19 @@ interface GhOpenStatus {
   statusCheckRollup: GhPullRequest["statusCheckRollup"];
 }
 
+let viewerLogin: Promise<string | null> | null = null;
+
+/** The GitHub login gh is signed in as, so PRs the user opened can be told from ones they reviewed. */
+function viewer(cwd: string): Promise<string | null> {
+  viewerLogin ??= exec("gh", ["api", "user", "--jq", ".login"], cwd)
+    .then((out) => out.trim() || null)
+    .catch(() => {
+      viewerLogin = null;
+      return null;
+    });
+  return viewerLogin;
+}
+
 const repoCache = new Map<string, { at: number; byBranch: Promise<Map<string, GhPullRequest[]>> }>();
 
 /**
@@ -107,7 +121,7 @@ function pullRequestsOf(repoRoot: string, refresh: boolean): Promise<Map<string,
   if (cached && !refresh && Date.now() - cached.at < PR_CACHE_MS) return cached.byBranch;
   const all = exec(
     "gh",
-    ["pr", "list", "--state", "all", "--limit", String(PR_LIMIT), "--json", "number,title,url,state,isDraft,headRefName"],
+    ["pr", "list", "--state", "all", "--limit", String(PR_LIMIT), "--json", "number,title,url,state,isDraft,headRefName,author"],
     repoRoot,
   );
   const open = exec(
@@ -167,13 +181,19 @@ export async function listWorkspacePullRequests(
         const repoRoot = (
           await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd)
         ).trim();
-        const [{ current, branches }, byBranch] = await Promise.all([
+        const [{ current, branches }, byBranch, me] = await Promise.all([
           branchesOf(cwd),
           pullRequestsOf(repoRoot.replace(/\/\.git$/, ""), refresh),
+          viewer(cwd),
         ]);
         const found: PullRequest[] = [];
         for (const branch of branches) {
           for (const pr of byBranch.get(branch) ?? []) {
+            // A branch the worktree has moved off counts only if the user opened its PR, so a
+            // teammate's PR checked out for review does not stick to the workspace. The current
+            // branch's PR always shows, as in Paseo's own sidebar.
+            const mine = !me || pr.author?.login?.toLowerCase() === me.toLowerCase();
+            if (branch !== current && !mine) continue;
             found.push({
               number: pr.number,
               title: pr.title,

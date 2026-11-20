@@ -11,33 +11,55 @@ import {
 } from "@getpaseo/plugin/client";
 import { copyText, Icon, Modal, TextInput, useToast } from "@getpaseo/plugin/client/ui";
 import { useCallback, useEffect, useState } from "react";
+import { shades } from "./colors";
 import { Pressable, Text, View } from "react-native";
 
 type Colors = PluginSidebarViewProps["theme"]["colors"];
 
 const ARCHIVE_CONFIRM_MS = 3000;
+
+/** 204913 → "205k", 15642 → "15.6k": large diffs otherwise crowd out the title. */
+function compact(value: number): string {
+  if (value < 10_000) return String(value);
+  return `${(value / 1000).toFixed(value < 100_000 ? 1 : 0)}k`;
+}
 const ICON = 13;
 
 function IconButton({
   name,
   label,
   color,
+  hoverColor,
   onPress,
+  onHover,
 }: {
   name: string;
   label: string;
   color: string;
+  hoverColor: string;
   onPress: () => void;
+  /** Tells the row the pointer is on a button, so the buttons stay put while it is. */
+  onHover: (hovered: boolean) => void;
 }) {
+  const [hovered, setHovered] = useState(false);
   return (
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={label}
       onPress={onPress}
+      onHoverIn={() => {
+        setHovered(true);
+        onHover(true);
+      }}
+      onHoverOut={() => {
+        setHovered(false);
+        onHover(false);
+      }}
       hitSlop={4}
       style={({ pressed }) => ({
-        width: 18,
-        height: 18,
+        width: 22,
+        height: 22,
+        backgroundColor: hovered ? hoverColor : undefined,
         borderRadius: 4,
         alignItems: "center",
         justifyContent: "center",
@@ -74,7 +96,7 @@ function MenuItem({
         paddingVertical: 10,
         paddingHorizontal: 12,
         borderRadius: 6,
-        backgroundColor: pressed ? colors.surface2 : undefined,
+        backgroundColor: pressed ? shades(colors.foreground).pressed : undefined,
       })}
     >
       <Icon name={icon} size={ICON} color={danger ? colors.statusDanger : colors.foregroundMuted} />
@@ -87,12 +109,15 @@ export function RowActions({
   reference,
   colors,
   showControls,
+  inline,
   onMove,
 }: {
   reference: WorkspaceRef;
   colors: Colors;
-  /** Hovered on a pointer layout, or always on touch. */
+  /** Hovered on a pointer layout. */
   showControls: boolean;
+  /** Touch layouts have no hover, so the controls sit in the row permanently instead of floating. */
+  inline: boolean;
   onMove: () => void;
 }) {
   const paseo = usePaseo();
@@ -108,6 +133,7 @@ export function RowActions({
   const [menuOpen, setMenuOpen] = useState(false);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [confirmArchive, setConfirmArchive] = useState(false);
+  const [onButtons, setOnButtons] = useState(false);
 
   useEffect(() => {
     if (!confirmArchive) return;
@@ -160,41 +186,79 @@ export function RowActions({
     if (text) void attempt(() => copyText(text), `Could not copy ${what}`, `Copied ${what}`);
   };
 
+  const controlsVisible = showControls || menuOpen || onButtons;
+  const diff =
+    info.additions !== null && (info.additions > 0 || (info.deletions ?? 0) > 0)
+      ? { additions: compact(info.additions), deletions: compact(info.deletions ?? 0) }
+      : null;
+  const controls = (
+    <>
+      {confirmArchive ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Confirm archive ${info.title}`}
+          onPress={archiveButton}
+          onHoverIn={() => setOnButtons(true)}
+          onHoverOut={() => setOnButtons(false)}
+          hitSlop={4}
+          style={{ paddingHorizontal: 4, height: 22, justifyContent: "center", borderRadius: 4 }}
+        >
+          <Text style={{ color: colors.statusDanger, fontSize: 11 }}>Archive?</Text>
+        </Pressable>
+      ) : (
+        <IconButton
+          name="Archive"
+          label={`Archive ${info.title}`}
+          color={colors.foregroundMuted}
+          hoverColor={shades(colors.foreground).button}
+          onPress={archiveButton}
+          onHover={setOnButtons}
+        />
+      )}
+      <IconButton
+        name="MoreVertical"
+        label={`More actions for ${info.title}`}
+        color={colors.foregroundMuted}
+        hoverColor={shades(colors.foreground).button}
+        onPress={() => setMenuOpen(true)}
+        onHover={setOnButtons}
+      />
+    </>
+  );
+
   return (
     <View style={{ flexDirection: "row", alignItems: "center", gap: 2, height: 18, marginTop: 4 }}>
-      {showControls || menuOpen ? (
-        <>
-          {confirmArchive ? (
-            <Pressable
-              accessibilityRole="button"
-              accessibilityLabel={`Confirm archive ${info.title}`}
-              onPress={archiveButton}
-              hitSlop={4}
-              style={{ paddingHorizontal: 4, height: 18, justifyContent: "center", borderRadius: 4 }}
+      {inline ? controls : (
+        // The diff stat always holds the slot's width, and the controls float over it on hover.
+        // Swapping one for the other changed the title's width, which rewrapped the PR chips under
+        // the pointer and made hover flicker on and off.
+        // Always at least as wide as the two buttons, so they never sit over the title and need
+        // no opaque backing (which cannot match an unknown sidebar color).
+        <View style={{ position: "relative", minHeight: 18, minWidth: 46, alignItems: "flex-end", justifyContent: "center" }}>
+          {diff ? (
+            <Text style={{ fontSize: 11, lineHeight: 18, opacity: controlsVisible ? 0 : 1 }}>
+              <Text style={{ color: colors.statusSuccess }}>+{diff.additions}</Text>{" "}
+              <Text style={{ color: colors.statusDanger }}>−{diff.deletions}</Text>
+            </Text>
+          ) : null}
+          {controlsVisible ? (
+            <View
+              style={{
+                position: "absolute",
+                right: 0,
+                top: -2,
+                height: 22,
+                flexDirection: "row",
+                alignItems: "center",
+                gap: 2,
+                paddingLeft: 6,
+              }}
             >
-              <Text style={{ color: colors.statusDanger, fontSize: 11 }}>Archive?</Text>
-            </Pressable>
-          ) : (
-            <IconButton
-              name="Archive"
-              label={`Archive ${info.title}`}
-              color={colors.foregroundMuted}
-              onPress={archiveButton}
-            />
-          )}
-          <IconButton
-            name="MoreVertical"
-            label={`More actions for ${info.title}`}
-            color={colors.foregroundMuted}
-            onPress={() => setMenuOpen(true)}
-          />
-        </>
-      ) : info.additions !== null && (info.additions > 0 || (info.deletions ?? 0) > 0) ? (
-        <Text style={{ fontSize: 11, lineHeight: 18 }}>
-          <Text style={{ color: colors.statusSuccess }}>+{info.additions}</Text>{" "}
-          <Text style={{ color: colors.statusDanger }}>−{info.deletions}</Text>
-        </Text>
-      ) : null}
+              {controls}
+            </View>
+          ) : null}
+        </View>
+      )}
 
       <Modal title={info.title} open={menuOpen} onOpenChange={closeMenu}>
         <Modal.Content contentContainerStyle={{ padding: 8, gap: 0 }}>
