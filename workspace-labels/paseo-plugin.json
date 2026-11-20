@@ -2,7 +2,7 @@
   "id": "paseo-workspace-labels",
   "media": [],
   "requirements": {
-    "paseo": ">=0.15.4 <0.16.0"
+    "paseo": ">=0.16.1"
   },
   "name": "Workspace labels for agents",
   "description": "Lets agents add and remove workspace labels"

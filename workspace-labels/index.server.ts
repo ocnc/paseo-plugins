@@ -1,24 +1,20 @@
 /** Gives every agent tools to read and set labels on its workspace (or another workspace). */
 import { z } from "zod";
 import { defineAgentTool, type PluginServerContext } from "@getpaseo/plugin/server";
-import { LABEL_COLORS, WorkspaceLabels } from "./server/labels";
+import { listLabelNames, setLabel } from "./server/labels";
 
 export default function contribute(server: PluginServerContext) {
-  const labels = new WorkspaceLabels();
-
   const listTool = defineAgentTool({
     name: "list_workspace_labels",
     description:
-      "List the workspace labels that already exist in Paseo, with their colors. Check this before " +
-      "labeling so you reuse an existing label name instead of creating a near-duplicate.",
+      "List the workspace label names currently in use in Paseo. Check this before labeling so " +
+      "you reuse an existing label name instead of creating a near-duplicate.",
     input: z.object({}),
-    async execute() {
-      const all = await labels.list();
+    async execute(_input, { paseo }) {
+      const names = await listLabelNames(paseo);
       return {
-        text: all.length
-          ? all.map((label) => `${label.name} (${label.color})`).join("\n")
-          : "No workspace labels exist yet.",
-        structuredContent: { labels: all },
+        text: names.length ? names.join("\n") : "No workspace labels are in use yet.",
+        structuredContent: { labels: names },
       };
     },
   });
@@ -35,21 +31,17 @@ export default function contribute(server: PluginServerContext) {
         .boolean()
         .default(true)
         .describe("true adds the label, false removes it from the workspace"),
-      color: z
-        .enum(LABEL_COLORS)
-        .optional()
-        .describe("Only for a new label or to recolor one; omit to keep the existing color"),
       workspaceId: z
         .string()
         .optional()
         .describe("Another workspace's ID; omit to label your own workspace"),
     }),
-    async execute({ name, assigned, color, workspaceId }, { agent }) {
+    async execute({ name, assigned, workspaceId }, { agent, paseo }) {
       const target = workspaceId ?? agent.workspaceId;
       if (!target) {
         return { isError: true, text: "This agent has no workspace; pass workspaceId." };
       }
-      const current = await labels.set({ workspaceId: target, name, assigned, color });
+      const current = await setLabel(paseo, { workspaceId: target, name, assigned });
       return {
         text: `${assigned ? "Added" : "Removed"} "${name}". Workspace labels now: ${
           current.length ? current.join(", ") : "none"
@@ -64,5 +56,5 @@ export default function contribute(server: PluginServerContext) {
     tools: [...request.tools, listTool, setTool],
   }));
 
-  return () => labels.close();
+  return () => {};
 }

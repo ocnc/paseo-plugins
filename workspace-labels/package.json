@@ -18,13 +18,10 @@
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
-    "@getpaseo/plugin": "0.15.4",
+    "@getpaseo/plugin": "0.16.1",
     "@types/node": "^26.6.6",
     "typescript": "^5.9.3",
     "zod": "^4.4.3"
   },
-  "type": "module",
-  "dependencies": {
-    "@getpaseo/client": "0.15.4"
-  }
+  "type": "module"
 }
