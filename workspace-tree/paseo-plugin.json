@@ -1,0 +1,9 @@
+{
+  "id": "paseo-workspace-tree",
+  "name": "Workspace tree",
+  "description": "Nests child workspaces under the workspace that spawned them",
+  "media": [],
+  "requirements": {
+    "paseo": ">=0.16.1"
+  }
+}
